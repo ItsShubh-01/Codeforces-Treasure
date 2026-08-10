@@ -1,92 +1,393 @@
-name: Test Codeforces API
+name: Sync Codeforces
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "30 12 * * *"
+
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  test:
+  sync:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Codeforces API
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync Codeforces solutions
         env:
           CF_API_KEY: ${{ secrets.CODEFORCES_API_KEY }}
           CF_API_SECRET: ${{ secrets.CODEFORCES_API_SECRET }}
         run: |
           python3 <<'PY'
+          import base64
           import hashlib
+          import json
+          import os
           import random
+          import re
+          import subprocess
           import time
           import urllib.parse
           import urllib.request
-          import json
-          import os
+          from pathlib import Path
 
-          handle = "RecursiveMoth"
-          method = "user.status"
+          HANDLE = "RecursiveMoth"
+          API_METHOD = "user.status"
+          BATCH_SIZE = 1000
 
-          params = {
-              "apiKey": os.environ["CF_API_KEY"],
-              "count": "1",
-              "handle": handle,
-              "includeSources": "true",
-              "time": str(int(time.time()))
-          }
+          def call_codeforces(params):
+              params = dict(params)
 
-          params = dict(sorted(params.items()))
+              params["apiKey"] = os.environ["CF_API_KEY"]
+              params["time"] = str(int(time.time()))
 
-          query = urllib.parse.urlencode(params)
+              params = dict(sorted(params.items()))
 
-          rand = f"{random.randint(0, 999999):06d}"
+              query = urllib.parse.urlencode(params)
 
-          signature_string = (
-              rand
-              + "/"
-              + method
-              + "?"
-              + query
-              + "#"
-              + os.environ["CF_API_SECRET"]
-          )
+              rand = f"{random.randint(0, 999999):06d}"
 
-          digest = hashlib.sha512(
-              signature_string.encode()
-          ).hexdigest()
-
-          api_sig = rand + digest
-
-          params["apiSig"] = api_sig
-
-          url = (
-              "https://codeforces.com/api/"
-              + method
-              + "?"
-              + urllib.parse.urlencode(params)
-          )
-
-          with urllib.request.urlopen(url) as response:
-              data = json.load(response)
-
-          if data["status"] != "OK":
-              raise RuntimeError(
-                  data.get("comment", "Codeforces API failed")
+              signature_string = (
+                  rand
+                  + "/"
+                  + API_METHOD
+                  + "?"
+                  + query
+                  + "#"
+                  + os.environ["CF_API_SECRET"]
               )
 
-          submissions = data["result"]
+              digest = hashlib.sha512(
+                  signature_string.encode("utf-8")
+              ).hexdigest()
 
-          print("Codeforces API authentication: SUCCESS")
-          print("Handle: RecursiveMoth")
-          print("Submissions returned:", len(submissions))
+              params["apiSig"] = rand + digest
 
-          if submissions:
-              submission = submissions[0]
+              url = (
+                  "https://codeforces.com/api/"
+                  + API_METHOD
+                  + "?"
+                  + urllib.parse.urlencode(params)
+              )
 
-              print("Latest submission ID:", submission.get("id"))
-              print("Latest verdict:", submission.get("verdict"))
-              print("Returned fields:", list(submission.keys()))
+              with urllib.request.urlopen(url, timeout=60) as response:
+                  data = json.load(response)
 
-          print("API test completed successfully.")
+              if data["status"] != "OK":
+                  raise RuntimeError(
+                      data.get(
+                          "comment",
+                          "Codeforces API request failed"
+                      )
+                  )
+
+              return data["result"]
+
+          def sanitize(text):
+              text = text.lower()
+              text = re.sub(r"[^a-z0-9]+", "-", text)
+              text = text.strip("-")
+
+              if not text:
+                  return "unknown-problem"
+
+              return text
+
+          def get_extension(language):
+              language = language.lower()
+
+              if "python" in language:
+                  return ".py"
+
+              if "java" in language:
+                  return ".java"
+
+              if "kotlin" in language:
+                  return ".kt"
+
+              if "rust" in language:
+                  return ".rs"
+
+              if "go" in language:
+                  return ".go"
+
+              if "javascript" in language:
+                  return ".js"
+
+              if "typescript" in language:
+                  return ".ts"
+
+              if "c#" in language or "csharp" in language:
+                  return ".cs"
+
+              if "php" in language:
+                  return ".php"
+
+              if "ruby" in language:
+                  return ".rb"
+
+              if "swift" in language:
+                  return ".swift"
+
+              if "scala" in language:
+                  return ".scala"
+
+              if "c++" in language or "gnu c++" in language:
+                  return ".cpp"
+
+              if language == "c" or language.startswith("c "):
+                  return ".c"
+
+              return ".txt"
+
+          print("======================================")
+          print("Codeforces → GitHub Sync")
+          print("======================================")
+          print("Handle:", HANDLE)
+          print()
+
+          all_submissions = []
+          start = 1
+
+          while True:
+              print(
+                  f"Fetching submissions "
+                  f"{start} to {start + BATCH_SIZE - 1}..."
+              )
+
+              submissions = call_codeforces({
+                  "handle": HANDLE,
+                  "from": str(start),
+                  "count": str(BATCH_SIZE),
+                  "includeSources": "true"
+              })
+
+              received = len(submissions)
+
+              print("Received:", received)
+
+              all_submissions.extend(submissions)
+
+              if received < BATCH_SIZE:
+                  break
+
+              start += BATCH_SIZE
+
+              # Codeforces API limit:
+              # maximum one request every two seconds.
+              time.sleep(2.2)
+
+          print()
+          print("Total submissions fetched:", len(all_submissions))
+
+          accepted = [
+              submission
+              for submission in all_submissions
+              if submission.get("verdict") == "OK"
+          ]
+
+          print("Accepted submissions:", len(accepted))
+
+          # Keep only the latest accepted submission
+          # for each unique Codeforces problem.
+          latest_accepted = {}
+
+          for submission in accepted:
+              problem = submission.get("problem", {})
+
+              contest_id = problem.get("contestId")
+              index = problem.get("index")
+
+              if contest_id is None or index is None:
+                  continue
+
+              problem_key = f"{contest_id}{index}"
+
+              if problem_key not in latest_accepted:
+                  latest_accepted[problem_key] = submission
+
+          print(
+              "Unique accepted problems:",
+              len(latest_accepted)
+          )
+
+          print()
+          print("Creating solution files...")
+          print()
+
+          synced = 0
+          skipped = 0
+
+          for problem_key, submission in latest_accepted.items():
+
+              problem = submission.get("problem", {})
+
+              contest_id = problem.get("contestId")
+              index = problem.get("index")
+              problem_name = problem.get(
+                  "name",
+                  "Unknown Problem"
+              )
+
+              language = submission.get(
+                  "programmingLanguage",
+                  "Unknown"
+              )
+
+              source_base64 = submission.get(
+                  "sourceBase64"
+              )
+
+              if not source_base64:
+                  print(
+                      f"SKIPPED: "
+                      f"{contest_id}{index} - "
+                      f"{problem_name} "
+                      f"(no source code)"
+                  )
+
+                  skipped += 1
+                  continue
+
+              try:
+                  source = base64.b64decode(
+                      source_base64
+                  ).decode("utf-8")
+
+              except UnicodeDecodeError:
+                  source = base64.b64decode(
+                      source_base64
+                  ).decode(
+                      "utf-8",
+                      errors="replace"
+                  )
+
+              folder_name = (
+                  f"{contest_id}{index}-"
+                  f"{sanitize(problem_name)}"
+              )
+
+              folder = Path(folder_name)
+
+              folder.mkdir(
+                  parents=True,
+                  exist_ok=True
+              )
+
+              extension = get_extension(language)
+
+              solution_file = (
+                  folder / f"solution{extension}"
+              )
+
+              solution_file.write_text(
+                  source,
+                  encoding="utf-8"
+              )
+
+              print(
+                  f"SYNCED: "
+                  f"{contest_id}{index} - "
+                  f"{problem_name} "
+                  f"[{language}]"
+              )
+
+              synced += 1
+
+          print()
+          print("======================================")
+          print("Sync summary")
+          print("======================================")
+          print(
+              "Total submissions:",
+              len(all_submissions)
+          )
+          print(
+              "Accepted submissions:",
+              len(accepted)
+          )
+          print(
+              "Unique accepted problems:",
+              len(latest_accepted)
+          )
+          print(
+              "Solutions synced:",
+              synced
+          )
+          print(
+              "Solutions skipped:",
+              skipped
+          )
+          print("======================================")
+
+          # Configure Git identity.
+          subprocess.run(
+              [
+                  "git",
+                  "config",
+                  "user.name",
+                  "github-actions[bot]"
+              ],
+              check=True
+          )
+
+          subprocess.run(
+              [
+                  "git",
+                  "config",
+                  "user.email",
+                  "41898282+github-actions[bot]@users.noreply.github.com"
+              ],
+              check=True
+          )
+
+          # Stage generated solution files.
+          subprocess.run(
+              ["git", "add", "."],
+              check=True
+          )
+
+          # Check whether anything changed.
+          result = subprocess.run(
+              [
+                  "git",
+                  "diff",
+                  "--cached",
+                  "--quiet"
+              ]
+          )
+
+          if result.returncode == 0:
+              print()
+              print("No repository changes detected.")
+              print("Everything is already synchronized.")
+
+          else:
+              print()
+              print("Changes detected.")
+              print("Creating Git commit...")
+
+              subprocess.run(
+                  [
+                      "git",
+                      "commit",
+                      "-m",
+                      "Sync Codeforces solutions"
+                  ],
+                  check=True
+              )
+
+              print("Pushing changes to GitHub...")
+
+              subprocess.run(
+                  ["git", "push"],
+                  check=True
+              )
+
+              print()
+              print("Successfully pushed Codeforces solutions.")
           PY
