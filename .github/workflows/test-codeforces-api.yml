@@ -33,11 +33,17 @@ jobs:
           import time
           import urllib.parse
           import urllib.request
+          from datetime import datetime, timezone
           from pathlib import Path
 
           HANDLE = "RecursiveMoth"
           API_METHOD = "user.status"
           BATCH_SIZE = 1000
+
+          # IMPORTANT:
+          # This email must be associated with your GitHub account.
+          GIT_NAME = "ItsShubh-01"
+          GIT_EMAIL = "shubhagarwalaaaaa@gmail.com"
 
           def call_codeforces(params):
               params = dict(params)
@@ -144,6 +150,13 @@ jobs:
 
               return ".txt"
 
+          def run_git(command, env=None):
+              subprocess.run(
+                  command,
+                  check=True,
+                  env=env
+              )
+
           print("======================================")
           print("Codeforces → GitHub Sync")
           print("======================================")
@@ -215,14 +228,41 @@ jobs:
               len(latest_accepted)
           )
 
+          # Sort chronologically so if several new problems
+          # are detected in one run, their commits are created
+          # from oldest submission to newest submission.
+          submissions_to_process = sorted(
+              latest_accepted.items(),
+              key=lambda item: item[1].get(
+                  "creationTimeSeconds",
+                  0
+              )
+          )
+
           print()
-          print("Creating solution files...")
+          print("Processing solution files...")
           print()
 
           synced = 0
           skipped = 0
+          commits_created = 0
 
-          for problem_key, submission in latest_accepted.items():
+          # Configure Git identity.
+          run_git([
+              "git",
+              "config",
+              "user.name",
+              GIT_NAME
+          ])
+
+          run_git([
+              "git",
+              "config",
+              "user.email",
+              GIT_EMAIL
+          ])
+
+          for problem_key, submission in submissions_to_process:
 
               problem = submission.get("problem", {})
 
@@ -242,12 +282,27 @@ jobs:
                   "sourceBase64"
               )
 
+              creation_time = submission.get(
+                  "creationTimeSeconds"
+              )
+
               if not source_base64:
                   print(
                       f"SKIPPED: "
                       f"{contest_id}{index} - "
                       f"{problem_name} "
                       f"(no source code)"
+                  )
+
+                  skipped += 1
+                  continue
+
+              if not creation_time:
+                  print(
+                      f"SKIPPED: "
+                      f"{contest_id}{index} - "
+                      f"{problem_name} "
+                      f"(no submission timestamp)"
                   )
 
                   skipped += 1
@@ -290,13 +345,101 @@ jobs:
               )
 
               print(
-                  f"SYNCED: "
+                  f"CHECKING: "
                   f"{contest_id}{index} - "
                   f"{problem_name} "
                   f"[{language}]"
               )
 
+              # Stage only this problem's folder.
+              run_git([
+                  "git",
+                  "add",
+                  "--",
+                  str(folder)
+              ])
+
+              # Check whether this particular problem
+              # actually changed.
+              result = subprocess.run(
+                  [
+                      "git",
+                      "diff",
+                      "--cached",
+                      "--quiet",
+                      "--",
+                      str(folder)
+                  ]
+              )
+
+              if result.returncode == 0:
+                  print(
+                      "  No change needed."
+                  )
+                  print()
+
+                  synced += 1
+                  continue
+
+              # Convert Codeforces Unix timestamp to UTC.
+              submission_datetime = datetime.fromtimestamp(
+                  int(creation_time),
+                  tz=timezone.utc
+              )
+
+              git_date = submission_datetime.strftime(
+                  "%Y-%m-%dT%H:%M:%SZ"
+              )
+
+              env = os.environ.copy()
+
+              # These dates are what GitHub uses for
+              # contribution-date calculation.
+              env["GIT_AUTHOR_DATE"] = git_date
+              env["GIT_COMMITTER_DATE"] = git_date
+
+              env["GIT_AUTHOR_NAME"] = GIT_NAME
+              env["GIT_AUTHOR_EMAIL"] = GIT_EMAIL
+
+              env["GIT_COMMITTER_NAME"] = GIT_NAME
+              env["GIT_COMMITTER_EMAIL"] = GIT_EMAIL
+
+              commit_message = (
+                  f"Codeforces {contest_id}{index}: "
+                  f"{problem_name}"
+              )
+
+              print(
+                  f"  CHANGE DETECTED"
+              )
+
+              print(
+                  f"  Codeforces submission time: "
+                  f"{git_date}"
+              )
+
+              print(
+                  f"  Creating commit: "
+                  f"{commit_message}"
+              )
+
+              run_git(
+                  [
+                      "git",
+                      "commit",
+                      "-m",
+                      commit_message
+                  ],
+                  env=env
+              )
+
+              commits_created += 1
               synced += 1
+
+              print(
+                  "  Commit created successfully."
+              )
+              print()
 
           print()
           print("======================================")
@@ -315,79 +458,41 @@ jobs:
               len(latest_accepted)
           )
           print(
-              "Solutions synced:",
+              "Solutions processed:",
               synced
           )
           print(
               "Solutions skipped:",
               skipped
           )
+          print(
+              "Git commits created:",
+              commits_created
+          )
           print("======================================")
 
-          # Configure Git identity.
-          subprocess.run(
-              [
-                  "git",
-                  "config",
-                  "user.name",
-                  "github-actions[bot]"
-              ],
-              check=True
-          )
-
-          subprocess.run(
-              [
-                  "git",
-                  "config",
-                  "user.email",
-                  "41898282+github-actions[bot]@users.noreply.github.com"
-              ],
-              check=True
-          )
-
-          # Stage generated solution files.
-          subprocess.run(
-              ["git", "add", "."],
-              check=True
-          )
-
-          # Check whether anything changed.
-          result = subprocess.run(
-              [
-                  "git",
-                  "diff",
-                  "--cached",
-                  "--quiet"
-              ]
-          )
-
-          if result.returncode == 0:
+          if commits_created == 0:
               print()
-              print("No repository changes detected.")
-              print("Everything is already synchronized.")
+              print("No new solution changes detected.")
+              print("Nothing to push.")
 
           else:
               print()
-              print("Changes detected.")
-              print("Creating Git commit...")
-
-              subprocess.run(
-                  [
-                      "git",
-                      "commit",
-                      "-m",
-                      "Sync Codeforces solutions"
-                  ],
-                  check=True
+              print(
+                  f"Pushing {commits_created} "
+                  f"historical-date commit(s) to GitHub..."
               )
 
-              print("Pushing changes to GitHub...")
-
-              subprocess.run(
-                  ["git", "push"],
-                  check=True
-              )
+              run_git([
+                  "git",
+                  "push",
+                  "origin",
+                  "main"
+              ])
 
               print()
-              print("Successfully pushed Codeforces solutions.")
+              print(
+                  "Successfully pushed Codeforces solutions."
+              )
+
           PY
