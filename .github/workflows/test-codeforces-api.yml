@@ -71,7 +71,9 @@ jobs:
               data = json.load(response)
 
           if data["status"] != "OK":
-              raise RuntimeError(data.get("comment", "Codeforces API failed"))
+              raise RuntimeError(
+                  data.get("comment", "Codeforces API failed")
+              )
 
           submissions = data["result"]
 
@@ -84,7 +86,7 @@ jobs:
 
               print("Latest submission ID:", submission.get("id"))
               print("Latest verdict:", submission.get("verdict"))
-              print("Source code returned:", "source" in submission or "sourceCode" in submission)
+              print("Returned fields:", list(submission.keys()))
 
           print("API test completed successfully.")
           PY
