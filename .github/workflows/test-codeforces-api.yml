@@ -1,0 +1,90 @@
+name: Test Codeforces API
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test Codeforces API
+        env:
+          CF_API_KEY: ${{ secrets.CODEFORCES_API_KEY }}
+          CF_API_SECRET: ${{ secrets.CODEFORCES_API_SECRET }}
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import random
+          import time
+          import urllib.parse
+          import urllib.request
+          import json
+          import os
+
+          handle = "RecursiveMoth"
+          method = "user.status"
+
+          params = {
+              "apiKey": os.environ["CF_API_KEY"],
+              "count": "1",
+              "handle": handle,
+              "includeSources": "true",
+              "time": str(int(time.time()))
+          }
+
+          params = dict(sorted(params.items()))
+
+          query = urllib.parse.urlencode(params)
+
+          rand = f"{random.randint(0, 999999):06d}"
+
+          signature_string = (
+              rand
+              + "/"
+              + method
+              + "?"
+              + query
+              + "#"
+              + os.environ["CF_API_SECRET"]
+          )
+
+          digest = hashlib.sha512(
+              signature_string.encode()
+          ).hexdigest()
+
+          api_sig = rand + digest
+
+          params["apiSig"] = api_sig
+
+          url = (
+              "https://codeforces.com/api/"
+              + method
+              + "?"
+              + urllib.parse.urlencode(params)
+          )
+
+          with urllib.request.urlopen(url) as response:
+              data = json.load(response)
+
+          if data["status"] != "OK":
+              raise RuntimeError(data.get("comment", "Codeforces API failed"))
+
+          submissions = data["result"]
+
+          print("Codeforces API authentication: SUCCESS")
+          print("Handle: RecursiveMoth")
+          print("Submissions returned:", len(submissions))
+
+          if submissions:
+              submission = submissions[0]
+
+              print("Latest submission ID:", submission.get("id"))
+              print("Latest verdict:", submission.get("verdict"))
+              print("Source code returned:", "source" in submission or "sourceCode" in submission)
+
+          print("API test completed successfully.")
+          PY
